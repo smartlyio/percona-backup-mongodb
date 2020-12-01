@@ -1,18 +1,20 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"sync"
 	"time"
 
 	"github.com/pkg/errors"
+	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo/options"
-	"gopkg.in/mgo.v2/bson"
 
 	"github.com/percona/percona-backup-mongodb/pbm"
 	"github.com/percona/percona-backup-mongodb/pbm/log"
+	"github.com/percona/percona-backup-mongodb/pbm/storage"
 	"github.com/percona/percona-backup-mongodb/version"
 )
 
@@ -285,7 +287,7 @@ type agentHB struct {
 	PBMStatus   agentHBsstat        `bson:"pbms"`
 	NodeStatus  agentHBsstat        `bson:"nodes"`
 	StoreStatus agentHBsstat        `bson:"stors"`
-	Heartbeat   primitive.Timestamp `bson:"hb"` // separated in order the lock can be searchable by the header
+	Heartbeat   primitive.Timestamp `bson:"hb"`
 }
 
 type agentHBsstat struct {
@@ -293,7 +295,7 @@ type agentHBsstat struct {
 	Err string `bson:"e"`
 }
 
-func (a *Agent) hbStatus() {
+func (a *Agent) HbStatus() {
 	hb := agentHB{
 		Node: a.node.Name(),
 		RS:   a.node.RS(),
@@ -303,11 +305,22 @@ func (a *Agent) hbStatus() {
 	tk := time.NewTicker(time.Second * 5)
 	defer tk.Stop()
 
-	for {
-		hb.PBMStatus = a.pbmStatus()
-		hb.NodeStatus = a.nodeStatus()
+	l := a.log.NewEvent("agentCheckup", "", "", primitive.Timestamp{})
 
-		a.setStatus(hb)
+	for range tk.C {
+		hb.PBMStatus = a.pbmStatus()
+		logHbStatus("PBM connecion", hb.PBMStatus, l)
+
+		hb.NodeStatus = a.nodeStatus()
+		logHbStatus("node connecion", hb.NodeStatus, l)
+
+		hb.StoreStatus = a.storStatus(l)
+		logHbStatus("storage connecion", hb.StoreStatus, l)
+
+		err := a.setStatus(hb)
+		if err != nil {
+			l.Error("set status: %v", err)
+		}
 	}
 }
 
@@ -335,16 +348,23 @@ func (a *Agent) nodeStatus() (sts agentHBsstat) {
 	return
 }
 
-func (a *Agent) storStatus() (sts agentHBsstat) {
+func (a *Agent) storStatus(log *log.Event) (sts agentHBsstat) {
 	sts.OK = false
 
-	stg, err := a.pbm.GetStorage(a.log.NewEvent("agentCheckup", "", "", primitive.Timestamp{}))
+	stg, err := a.pbm.GetStorage(log)
 	if err != nil {
 		sts.Err = fmt.Sprintf("unable to get storage: %v", err)
 		return sts
 	}
 
 	err = stg.CheckFile(pbm.StorInitFile)
+	if errors.Is(err, storage.ErrNotExist) {
+		err := stg.Save(pbm.StorInitFile, bytes.NewBufferString(version.DefaultInfo.Version), 0)
+		if err != nil {
+			sts.Err = fmt.Sprintf("storage: no init file, attempt to create failed: %v", err)
+			return sts
+		}
+	}
 	if err != nil {
 		sts.Err = fmt.Sprintf("storage check failed with: %v", err)
 		return sts
@@ -354,24 +374,30 @@ func (a *Agent) storStatus() (sts agentHBsstat) {
 	return sts
 }
 
+func logHbStatus(name string, st agentHBsstat, l *log.Event) {
+	if !st.OK {
+		l.Error("check %s: %s", name, st.Err)
+	}
+}
+
 func (a *Agent) setStatus(hb agentHB) error {
 	ct, err := a.pbm.ClusterTime()
 	if err != nil {
 		return errors.Wrap(err, "get cluster time")
 	}
 	hb.Heartbeat = ct
-	_, err = a.pbm.Conn.Database(pbm.DB).Collection(pbm.ConfigCollection).UpdateOne(
+
+	_, err = a.pbm.Conn.Database(pbm.DB).Collection(pbm.AgentsStatusCollection).ReplaceOne(
 		a.pbm.Context(),
 		bson.D{{"n", hb.Node}, {"rs", hb.RS}},
-		bson.M{"$set": ct},
-		options.Update().SetUpsert(true),
+		hb,
+		options.Replace().SetUpsert(true),
 	)
-
 	return errors.Wrap(err, "write into db")
 }
 
 func (a *Agent) rmStatus(hb agentHB) error {
-	_, err := a.pbm.Conn.Database(pbm.DB).Collection(pbm.ConfigCollection).DeleteOne(
+	_, err := a.pbm.Conn.Database(pbm.DB).Collection(pbm.AgentsStatusCollection).DeleteOne(
 		a.pbm.Context(),
 		bson.D{{"n", hb.Node}, {"rs", hb.RS}},
 	)

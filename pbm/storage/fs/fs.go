@@ -56,9 +56,14 @@ func (fs *FS) SourceReader(name string) (io.ReadCloser, error) {
 
 func (fs *FS) CheckFile(name string) error {
 	f, err := os.Stat(path.Join(fs.opts.Path, name))
+
+	if errors.Is(err, os.ErrNotExist) {
+		return storage.ErrNotExist
+	}
 	if err != nil {
 		return err
 	}
+
 	if f.Size() == 0 {
 		return errors.New("file empty")
 	}

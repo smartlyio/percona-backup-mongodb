@@ -53,8 +53,8 @@ const (
 	StatusCollection = "pbmStatus"
 	// PBMOpLogCollection contains log of aquired locks (hence run ops)
 	PBMOpLogCollection = "pbmOpLog"
-	// AgentsRegCollection is a agents registry with its status/health checks
-	AgentsRegCollection = "pbmAgents"
+	// AgentsStatusCollection is a agents registry with its status/health checks
+	AgentsStatusCollection = "pbmAgents"
 
 	// MetadataFileSuffix is a suffix for the metadata file on a storage
 	MetadataFileSuffix = ".pbm.json"

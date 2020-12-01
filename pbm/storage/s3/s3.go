@@ -296,6 +296,10 @@ func (s *S3) CheckFile(name string) error {
 		Key:    aws.String(path.Join(s.opts.Prefix, name)),
 	})
 	if err != nil {
+		if aerr, ok := err.(awserr.Error); ok && aerr.Code() == "NotFound" {
+			return storage.ErrNotExist
+		}
+
 		return errors.Wrap(err, "get S3 object header")
 	}
 
