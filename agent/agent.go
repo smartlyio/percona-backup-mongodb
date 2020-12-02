@@ -8,9 +8,7 @@ import (
 	"time"
 
 	"github.com/pkg/errors"
-	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
-	"go.mongodb.org/mongo-driver/mongo/options"
 
 	"github.com/percona/percona-backup-mongodb/pbm"
 	"github.com/percona/percona-backup-mongodb/pbm/log"
@@ -281,28 +279,15 @@ func (a *Agent) aquireLock(l *pbm.Lock) (got bool, err error) {
 	}
 }
 
-type agentHB struct {
-	Node        string              `bson:"n"`
-	RS          string              `bson:"rs"`
-	PBMStatus   agentHBsstat        `bson:"pbms"`
-	NodeStatus  agentHBsstat        `bson:"nodes"`
-	StoreStatus agentHBsstat        `bson:"stors"`
-	Heartbeat   primitive.Timestamp `bson:"hb"`
-}
-
-type agentHBsstat struct {
-	OK  bool   `bson:"ok"`
-	Err string `bson:"e"`
-}
-
 func (a *Agent) HbStatus() {
-	hb := agentHB{
+	hb := pbm.AgentStat{
 		Node: a.node.Name(),
 		RS:   a.node.RS(),
+		Ver:  version.DefaultInfo.Version,
 	}
-	defer a.rmStatus(hb)
+	defer a.pbm.RmAgentStatus(hb)
 
-	tk := time.NewTicker(time.Second * 5)
+	tk := time.NewTicker(pbm.AgentsStatCheckRange)
 	defer tk.Stop()
 
 	l := a.log.NewEvent("agentCheckup", "", "", primitive.Timestamp{})
@@ -314,17 +299,17 @@ func (a *Agent) HbStatus() {
 		hb.NodeStatus = a.nodeStatus()
 		logHbStatus("node connecion", hb.NodeStatus, l)
 
-		hb.StoreStatus = a.storStatus(l)
-		logHbStatus("storage connecion", hb.StoreStatus, l)
+		hb.StorageStatus = a.storStatus(l)
+		logHbStatus("storage connecion", hb.StorageStatus, l)
 
-		err := a.setStatus(hb)
+		err := a.pbm.SetAgentStatus(hb)
 		if err != nil {
 			l.Error("set status: %v", err)
 		}
 	}
 }
 
-func (a *Agent) pbmStatus() (sts agentHBsstat) {
+func (a *Agent) pbmStatus() (sts pbm.SubsysStatus) {
 	err := a.pbm.Conn.Ping(a.pbm.Context(), nil)
 	if err != nil {
 		sts.OK = false
@@ -336,7 +321,7 @@ func (a *Agent) pbmStatus() (sts agentHBsstat) {
 	return
 }
 
-func (a *Agent) nodeStatus() (sts agentHBsstat) {
+func (a *Agent) nodeStatus() (sts pbm.SubsysStatus) {
 	err := a.node.Session().Ping(a.pbm.Context(), nil)
 	if err != nil {
 		sts.OK = false
@@ -348,7 +333,7 @@ func (a *Agent) nodeStatus() (sts agentHBsstat) {
 	return
 }
 
-func (a *Agent) storStatus(log *log.Event) (sts agentHBsstat) {
+func (a *Agent) storStatus(log *log.Event) (sts pbm.SubsysStatus) {
 	sts.OK = false
 
 	stg, err := a.pbm.GetStorage(log)
@@ -374,33 +359,8 @@ func (a *Agent) storStatus(log *log.Event) (sts agentHBsstat) {
 	return sts
 }
 
-func logHbStatus(name string, st agentHBsstat, l *log.Event) {
+func logHbStatus(name string, st pbm.SubsysStatus, l *log.Event) {
 	if !st.OK {
 		l.Error("check %s: %s", name, st.Err)
 	}
-}
-
-func (a *Agent) setStatus(hb agentHB) error {
-	ct, err := a.pbm.ClusterTime()
-	if err != nil {
-		return errors.Wrap(err, "get cluster time")
-	}
-	hb.Heartbeat = ct
-
-	_, err = a.pbm.Conn.Database(pbm.DB).Collection(pbm.AgentsStatusCollection).ReplaceOne(
-		a.pbm.Context(),
-		bson.D{{"n", hb.Node}, {"rs", hb.RS}},
-		hb,
-		options.Replace().SetUpsert(true),
-	)
-	return errors.Wrap(err, "write into db")
-}
-
-func (a *Agent) rmStatus(hb agentHB) error {
-	_, err := a.pbm.Conn.Database(pbm.DB).Collection(pbm.AgentsStatusCollection).DeleteOne(
-		a.pbm.Context(),
-		bson.D{{"n", hb.Node}, {"rs", hb.RS}},
-	)
-
-	return err
 }
