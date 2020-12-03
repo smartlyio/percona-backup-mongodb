@@ -65,7 +65,7 @@ func status(cn *pbm.PBM) {
 
 			fstat := ""
 			if ok, errs := stat.OK(); !ok {
-				fstat = "FAILED status:\n    ERROR with " + strings.Join(errs, "    ERROR with ")
+				fstat = "FAILED status:\n      > ERROR with " + strings.Join(errs, "\n      > ERROR with ")
 			} else {
 				fstat = "OK"
 			}

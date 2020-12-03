@@ -858,7 +858,7 @@ func (p *PBM) GetAgentStatus(rs, node string) (s AgentStat, err error) {
 		bson.D{{"n", node}, {"rs", rs}},
 	)
 	if res.Err() != nil {
-		return s, errors.Wrap(err, "query mongo")
+		return s, errors.Wrap(res.Err(), "query mongo")
 	}
 
 	err = res.Decode(&s)
@@ -871,7 +871,15 @@ func (p *PBM) AgentStatusGC() error {
 	if err != nil {
 		return errors.Wrap(err, "get cluster time")
 	}
-	ct.T -= uint32(AgentsStatCheckRange.Seconds() * 3)
+	// 30 secs is the connection time out for mongo. So if there are some connection issues the agent checker
+	// may stuck for 30 sec on ping (trying to connect), it's HB became stale and it would be collected.
+	// Which would lead to the false clamin "not found" in the status output. So stale range should at least 30 sec
+	// (+5 just in case).
+	stalesec := AgentsStatCheckRange.Seconds() * 3
+	if stalesec < 35 {
+		stalesec = 35
+	}
+	ct.T -= uint32(stalesec)
 	_, err = p.Conn.Database(DB).Collection(AgentsStatusCollection).DeleteMany(
 		p.ctx,
 		bson.M{"hb": bson.M{"$lt": ct}},
