@@ -21,7 +21,7 @@ func (p *PBM) ResyncStorage(l *log.Event) error {
 		return errors.Wrap(err, "unable to get backup store")
 	}
 
-	err = stg.CheckFile(StorInitFile)
+	_, err = stg.FileStat(StorInitFile)
 	if errors.Is(err, storage.ErrNotExist) {
 		err = stg.Save(StorInitFile, bytes.NewBufferString(version.DefaultInfo.Version), 0)
 	}

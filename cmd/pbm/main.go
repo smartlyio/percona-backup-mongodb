@@ -312,6 +312,9 @@ func deleteBackup(pbmClient *pbm.PBM) {
 	if err == errTout {
 		fmt.Println("\nOperation is still in progress, please check agents' logs in a while")
 	} else {
+		time.Sleep(time.Second)
+		fmt.Print(".")
+		time.Sleep(time.Second)
 		fmt.Println("[done]")
 	}
 	printBackupList(pbmClient, 0)

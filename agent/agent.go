@@ -342,7 +342,7 @@ func (a *Agent) storStatus(log *log.Event) (sts pbm.SubsysStatus) {
 		return sts
 	}
 
-	err = stg.CheckFile(pbm.StorInitFile)
+	_, err = stg.FileStat(pbm.StorInitFile)
 	if errors.Is(err, storage.ErrNotExist) {
 		err := stg.Save(pbm.StorInitFile, bytes.NewBufferString(version.DefaultInfo.Version), 0)
 		if err != nil {

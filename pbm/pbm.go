@@ -74,6 +74,27 @@ const (
 	CmdDeleteBackup     Command = "delete"
 )
 
+func (c Command) String() string {
+	switch c {
+	case CmdBackup:
+		return "Snapshot backup"
+	case CmdRestore:
+		return "Snapshot restore"
+	case CmdCancelBackup:
+		return "Backup cancelation"
+	case CmdResyncBackupList:
+		return "Resync storage"
+	case CmdPITR:
+		return "PITR incremental backup"
+	case CmdPITRestore:
+		return "PITR restore"
+	case CmdDeleteBackup:
+		return "Delete"
+	default:
+		return "Undefined"
+	}
+}
+
 type OPID primitive.ObjectID
 
 type Cmd struct {
