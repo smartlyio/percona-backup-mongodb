@@ -223,6 +223,8 @@ func main() {
 	case logsCmd.FullCommand():
 		logs(pbmClient)
 	case statusCmd.FullCommand():
+		status2(pbmClient, FormatJSON)
+		status2(pbmClient, FormatText)
 		status(pbmClient)
 	}
 }
