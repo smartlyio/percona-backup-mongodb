@@ -66,9 +66,10 @@ var (
 	logsNodeF  = logsCmd.Flag("node", "Target node in format replset[/host:posrt]").Short('n').String()
 	logsTypeF  = logsCmd.Flag("severity", "Severity level D, I, W, E or F, low to high. Choosing one includes higher levels too.").Short('s').Default("I").Enum("D", "I", "W", "E", "F")
 	logsEventF = logsCmd.Flag("event", "Event in format backup[/2020-10-06T11:45:14Z]").Short('e').String()
-	logsOutF   = logsCmd.Flag("out", "Event in format backup[/2020-10-06T11:45:14Z]").Short('o').Default("text").Enum("json", "text")
+	logsOutF   = logsCmd.Flag("out", "Output format").Short('o').Default("text").Enum("json", "text")
 
-	statusCmd = pbmCmd.Command("status", "Show PBM status")
+	statusCmd  = pbmCmd.Command("status", "Show PBM status")
+	statusOutF = statusCmd.Flag("out", "Output format").Short('o').Default("text").Hidden().Enum("json", "text")
 
 	client *mongo.Client
 )
@@ -223,9 +224,12 @@ func main() {
 	case logsCmd.FullCommand():
 		logs(pbmClient)
 	case statusCmd.FullCommand():
-		status2(pbmClient, FormatJSON)
-		status2(pbmClient, FormatText)
-		status(pbmClient)
+		frmt := formatText
+		if *statusOutF == "json" {
+			frmt = formatJSON
+		}
+
+		status(pbmClient, frmt)
 	}
 }
 

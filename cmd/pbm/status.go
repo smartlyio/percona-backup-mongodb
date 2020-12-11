@@ -9,11 +9,11 @@ import (
 	"time"
 
 	"github.com/pkg/errors"
-	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 
 	"github.com/percona/percona-backup-mongodb/pbm"
 	plog "github.com/percona/percona-backup-mongodb/pbm/log"
+	"github.com/percona/percona-backup-mongodb/pbm/storage"
 )
 
 type statusSect struct {
@@ -30,14 +30,14 @@ func (f statusSect) MarshalJSON() ([]byte, error) {
 	return json.Marshal(s)
 }
 
-type OutFormat int
+type outFormat int
 
 const (
-	FormatText OutFormat = iota
-	FormatJSON
+	formatText outFormat = iota
+	formatJSON
 )
 
-func status2(cn *pbm.PBM, f OutFormat) {
+func status(cn *pbm.PBM, f outFormat) {
 	var o []statusSect
 
 	sections := []struct {
@@ -47,6 +47,7 @@ func status2(cn *pbm.PBM, f OutFormat) {
 		{"Cluster", clusterStatus},
 		{"PITR incremental backup", getPitrStatus},
 		{"Currently running", getCurrOps},
+		{"Backups", getStorageStat},
 	}
 
 	for _, s := range sections {
@@ -60,21 +61,16 @@ func status2(cn *pbm.PBM, f OutFormat) {
 	}
 
 	switch f {
-	case FormatJSON:
+	case formatJSON:
 		err := json.NewEncoder(os.Stdout).Encode(o)
 		if err != nil {
 			log.Println("ERROR: encode status:", err)
 		}
 	default:
 		for _, s := range o {
-			fmt.Println(s)
+			fmt.Printf("\n%s\n", strings.TrimSpace(s.String()))
 		}
 	}
-}
-
-func status(cn *pbm.PBM) {
-	printh("Storage (compressed size):")
-	storageStatus(cn)
 }
 
 func findLock(cn *pbm.PBM, fn func(*pbm.LockHeader) ([]pbm.LockData, error)) (*pbm.LockData, error) {
@@ -117,88 +113,6 @@ func findLock(cn *pbm.PBM, fn func(*pbm.LockHeader) ([]pbm.LockData, error)) (*p
 	return lk, nil
 }
 
-func storageStatus(cn *pbm.PBM) {
-	bcps, err := cn.BackupsList(0)
-	if err != nil {
-		log.Println("ERROR: get backups list:", err)
-		return
-	}
-
-	stg, err := cn.GetStorage(nil)
-	if err != nil {
-		log.Println("ERROR: get storage:", err)
-		return
-	}
-
-	cfg, err := cn.GetConfig()
-	if err != nil {
-		log.Println("ERROR: get config:", err)
-		return
-	}
-
-	switch cfg.Storage.Type {
-	case pbm.StorageS3:
-		var url []string
-		if cfg.Storage.S3.EndpointURL != "" {
-			url = append(url, cfg.Storage.S3.EndpointURL)
-		}
-		url = append(url, cfg.Storage.S3.Bucket)
-		if cfg.Storage.S3.Prefix != "" {
-			url = append(url, cfg.Storage.S3.Prefix)
-		}
-		r := ""
-		if cfg.Storage.S3.Region != "" {
-			r = " " + cfg.Storage.S3.Region
-		}
-		fmt.Printf("S3%s %s\n", r, strings.Join(url, "/"))
-	case pbm.StorageFilesystem:
-		fmt.Printf("FS %s\n", cfg.Storage.Filesystem.Path)
-	}
-
-	var lts primitive.Timestamp
-	for _, bcp := range bcps {
-		if bcp.Status != pbm.StatusDone {
-			continue
-		}
-		var sz, opsz int64
-		for _, rs := range bcp.Replsets {
-			ds, err := stg.FileStat(rs.DumpName)
-			if err != nil {
-				log.Printf("ERROR: get file %s: %v", rs.DumpName, err)
-			}
-
-			sz += ds.Size
-
-			os, err := stg.FileStat(rs.OplogName)
-			if err != nil {
-				log.Printf("ERROR: get file %s: %v", rs.OplogName, err)
-			}
-
-			sz += os.Size
-
-			if lts.T > 0 {
-				cnhks, err := cn.PITRGetChunksSlice(rs.Name, rs.FirstWriteTS, lts)
-				if err != nil {
-					log.Printf("ERROR: get PITR chunks for %s/%s", bcp.Name, rs.Name)
-					continue
-				}
-				for _, c := range cnhks {
-					csz, err := stg.FileStat(c.FName)
-					if err != nil {
-						log.Printf("ERROR: get PITR file %s: %v", c.FName, err)
-					}
-					opsz += csz.Size
-				}
-			}
-		}
-		lts = bcp.LastWriteTS
-		if opsz > 0 {
-			fmt.Printf("    PITR chunks %s\n", fmtSize(opsz))
-		}
-		fmt.Printf("  %s %s [complete: %s]\n", bcp.Name, fmtSize(sz), time.Unix(int64(bcp.LastWriteTS.T), 0).UTC().Format("2006-01-02T15:04:05"))
-	}
-}
-
 func fmtSize(size int64) string {
 	const (
 		_          = iota
@@ -225,12 +139,6 @@ func fmtSize(size int64) string {
 
 func fmtTS(ts int64) string {
 	return time.Unix(ts, 0).UTC().Format("2006-01-02T15:04:05")
-}
-
-func printh(s string) {
-	fmt.Println()
-	fmt.Printf("%s\n", s)
-	fmt.Println(strings.Repeat("=", len(s)))
 }
 
 func sprinth(s string) string {
@@ -470,22 +378,22 @@ func getCurrOps(cn *pbm.PBM) (fmt.Stringer, error) {
 }
 
 type storageStat struct {
-	Type   pbm.StorageType `json:"type"`
-	Path   string          `json:"path"`
-	Region string          `json:"region,omitempty"`
-	Data   []struct {
-		Snapshot snapshotStat `json:"snapshot"`
-		PITR     *pitrStat    `json:"pitrChunks"`
-	} `json:"data,omitempty"`
+	Type     pbm.StorageType `json:"type"`
+	Path     string          `json:"path"`
+	Region   string          `json:"region,omitempty"`
+	Snapshot []snapshotStat  `json:"snapshot"`
+	PITR     []pitrRange     `json:"pitrChunks,omitempty"`
 }
 
 type snapshotStat struct {
-	Name       string `json:"name"`
-	CompleteTS int64  `json:"completeTS"`
-	Size       int64  `json:"size"`
+	Name    string     `json:"name"`
+	Size    int64      `json:"size"`
+	Status  pbm.Status `json:"status"`
+	Err     string     `json:"error,omitempty"`
+	StateTS int64      `json:"completeTS"`
 }
 
-type pitrStat struct {
+type pitrRange struct {
 	Range struct {
 		Start int64 `json:"start"`
 		End   int64 `json:"end"`
@@ -498,16 +406,35 @@ func (s storageStat) String() string {
 	if s.Type == pbm.StorageFilesystem {
 		typ = "FS"
 	}
-	ret := fmt.Sprintf("%s %s %s", typ, s.Region, s.Path)
-	if len(s.Data) == 0 {
-		return ret + "\n  (none)"
+	ret := fmt.Sprintf("%s %s %s\n", typ, s.Region, s.Path)
+	if len(s.Snapshot) == 0 {
+		return ret + "  (none)"
 	}
 
-	for _, d := range s.Data {
-		ret += fmt.Sprintf("  %s %s [complete: %s]", d.Snapshot.Name, fmtSize(d.Snapshot.Size), fmtTS(d.Snapshot.CompleteTS))
-		if d.PITR != nil {
-			ret += fmt.Sprintf("    PITR chunks [%s - %s] %s", fmtTS(d.PITR.Range.Start), fmtTS(d.PITR.Range.End), fmtSize(d.PITR.Size))
+	ret += fmt.Sprintln("  Snapshots:")
+	for _, sn := range s.Snapshot {
+		ret += fmt.Sprintf("    %s %s", sn.Name, fmtSize(sn.Size))
+		switch sn.Status {
+		case pbm.StatusDone:
+			ret += fmt.Sprintf(" [complete: %s]", fmtTS(sn.StateTS))
+		case pbm.StatusCancelled:
+			ret += fmt.Sprintf(" [cancelled: %s]", fmtTS(sn.StateTS))
+		case pbm.StatusError:
+			ret += fmt.Sprintf(" [error: %s / %s]", sn.Err, fmtTS(sn.StateTS))
+		default:
+			ret += fmt.Sprintf(" [running: %s / %s]", sn.Status, fmtTS(sn.StateTS))
 		}
+		ret += "\n"
+	}
+
+	if len(s.PITR) == 0 {
+		return ret
+	}
+
+	ret += fmt.Sprintln("  PITR chunks:")
+
+	for _, sn := range s.PITR {
+		ret += fmt.Sprintf("    %s - %s %s\n", fmtTS(sn.Range.Start), fmtTS(sn.Range.End), fmtSize(sn.Size))
 	}
 
 	return ret
@@ -549,52 +476,84 @@ func getStorageStat(cn *pbm.PBM) (fmt.Stringer, error) {
 		return s, errors.Wrap(err, "get storage")
 	}
 
-	var lts primitive.Timestamp
 	for _, bcp := range bcps {
-		if bcp.Status != pbm.StatusDone {
+		snpsht := snapshotStat{
+			Name:    bcp.Name,
+			Status:  bcp.Status,
+			StateTS: bcp.LastTransitionTS,
+		}
+
+		switch bcp.Status {
+		case pbm.StatusDone:
+			snpsht.StateTS = int64(bcp.LastWriteTS.T)
+			sz, err := getSnapshotSize(bcp.Replsets, stg)
+			if err != nil {
+				log.Println("ERROR:", err)
+				continue
+			}
+			snpsht.Size = sz
+		case pbm.StatusError:
+			snpsht.Err = bcp.Error
+		}
+		s.Snapshot = append(s.Snapshot, snpsht)
+	}
+
+	s.PITR, err = getPITRranges(cn, stg)
+	if err != nil {
+		return s, errors.Wrap(err, "get PITR chunks")
+	}
+
+	return s, nil
+}
+
+func getPITRranges(cn *pbm.PBM, stg storage.Storage) (pr []pitrRange, err error) {
+	inf, err := cn.GetNodeInfo()
+	if err != nil {
+		return pr, errors.Wrap(err, "define cluster state")
+	}
+
+	shards := []pbm.Shard{{ID: inf.SetName}}
+	if inf.IsSharded() {
+		s, err := cn.GetShards()
+		if err != nil {
+			return pr, errors.Wrap(err, "get shards")
+		}
+		shards = append(shards, s...)
+	}
+
+	now := time.Now().Unix()
+	var rstlines [][]pbm.Timeline
+	for _, s := range shards {
+		tlns, err := cn.PITRGetValidTimelines(s.ID, now, stg)
+		if err != nil {
+			log.Printf("ERROR: get PITR timelines for %s replset: %v", s.ID, err)
 			continue
 		}
-		snpsht := snapshotStat{
-			Name:       bcp.Name,
-			CompleteTS: int64(bcp.LastWriteTS.T),
+		rstlines = append(rstlines, tlns)
+	}
+
+	merged := pbm.MergeTimelines(rstlines...)
+
+	for i := len(merged) - 1; i >= 0; i-- {
+		tl := merged[i]
+		var rng pitrRange
+		rng.Range.Start = int64(tl.Start)
+		rng.Range.End = int64(tl.End)
+		rng.Size = tl.Size
+		pr = append(pr, rng)
+	}
+
+	return pr, nil
+}
+
+func getSnapshotSize(rsets []pbm.BackupReplset, stg storage.Storage) (s int64, err error) {
+	for _, rs := range rsets {
+		ds, err := stg.FileStat(rs.DumpName)
+		if err != nil {
+			return s, errors.Wrapf(err, "get file %s", rs.DumpName)
 		}
-		var opsz int64
-		for _, rs := range bcp.Replsets {
-			ds, err := stg.FileStat(rs.DumpName)
-			if err != nil {
-				log.Printf("ERROR: get file %s: %v", rs.DumpName, err)
-				continue
-			}
 
-			snpsht.Size += ds.Size
-
-			os, err := stg.FileStat(rs.OplogName)
-			if err != nil {
-				log.Printf("ERROR: get file %s: %v", rs.OplogName, err)
-				continue
-			}
-
-			snpsht.Size += os.Size
-
-			if lts.T > 0 {
-				cnhks, err := cn.PITRGetChunksSlice(rs.Name, rs.FirstWriteTS, lts)
-				if err != nil {
-					log.Printf("ERROR: get PITR chunks for %s/%s", bcp.Name, rs.Name)
-					continue
-				}
-				for _, c := range cnhks {
-					csz, err := stg.FileStat(c.FName)
-					if err != nil {
-						log.Printf("ERROR: get PITR file %s: %v", c.FName, err)
-					}
-					opsz += csz.Size
-				}
-			}
-		}
-		lts = bcp.LastWriteTS
-		if opsz > 0 {
-			fmt.Printf("    PITR chunks %s\n", fmtSize(opsz))
-		}
+		s += ds.Size
 	}
 
 	return s, nil
